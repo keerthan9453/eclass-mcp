@@ -175,3 +175,5 @@ if (TOKEN) {
 }
 await server.connect(new StdioServerTransport());
 console.error(`eclass MCP running (ICS: ${ICS_URL ? "on" : "off"}, API: ${TOKEN ? "on" : "off"})`);
+// Exit when the client disconnects (otherwise the --demo mock server would keep the process alive).
+process.stdin.on("close", () => process.exit(0));
