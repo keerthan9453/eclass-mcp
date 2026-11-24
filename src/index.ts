@@ -58,12 +58,21 @@ async function ws<T = any>(wsfunction: string, params: Record<string, string | n
     method: "POST",
     body: form,
     signal: AbortSignal.timeout(TIMEOUT_MS),
+    headers: { "user-agent": "eclass-mcp/0.1 (+https://github.com/keerthan9453/eclass-mcp)" },
   });
-  if (!res.ok) throw new Error(`HTTP ${res.status} from eClass web service`);
+  const ctype = res.headers.get("content-type") ?? "unknown";
+  const raw = await res.text();
+  const snippet = raw.replace(/<script[\s\S]*?<\/script>|<style[\s\S]*?<\/style>|<[^>]+>/g, " ").replace(/\s+/g, " ").trim().slice(0, 160);
   let data: any;
-  try { data = await res.json(); } catch {
-    throw new Error("eClass did not return JSON. Web services may be disabled, or the URL/login redirect is wrong.");
+  try { data = JSON.parse(raw); } catch {
+    const host = new URL(res.url).host;
+    throw new Error(
+      `eClass did not return JSON (HTTP ${res.status}, ${ctype}, ended at ${host}${new URL(res.url).pathname}). ` +
+      `Likely causes: a login/SSO redirect, a bot-protection challenge, a wrong ECLASS_BASE_URL, or web services disabled. ` +
+      `Page text: "${snippet}"`,
+    );
   }
+  if (!res.ok && !data?.exception) throw new Error(`HTTP ${res.status} from eClass web service`);
   if (data?.exception) throw new Error(`${data.errorcode}: ${data.message}`);
   return data as T;
 }

@@ -114,7 +114,7 @@ await test("invalid token → clear error and the bad token is NOT echoed back",
 await test("web services disabled (HTML back) → explains likely cause", () =>
   withServer({ ...WS, ECLASS_WS_TOKEN: "html-token-123" }, async (c) => {
     const r = await call(c, "check_connection");
-    assert.ok(r.err && /did not return JSON/.test(r.text), r.text);
+    assert.ok(r.err && /did not return JSON/.test(r.text) && /HTTP 200/.test(r.text) && /text\/html/.test(r.text) && /SSO page/.test(r.text), r.text);
   }));
 await test("token over plain http to a non-local host is refused", () =>
   withServer({ ECLASS_BASE_URL: "http://eclass.example.com", ECLASS_WS_TOKEN: "t" }, async (c) => {
