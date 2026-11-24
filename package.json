@@ -1,0 +1,38 @@
+{
+  "name": "eclass-mcp",
+  "version": "0.1.0",
+  "description": "Read-only MCP server for York University eClass (Moodle): deadlines, courses, assignments, grades",
+  "main": "dist/index.js",
+  "scripts": {
+    "test": "npm run build && node test/e2e.mjs",
+    "build": "tsc",
+    "start": "node dist/index.js",
+    "demo": "npm run build && node demo/run-demo.mjs",
+    "mock": "node demo/mock-eclass.mjs"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "MIT",
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.32.2",
+    "node-ical": "^0.27.6",
+    "zod": "^4.6.7"
+  },
+  "devDependencies": {
+    "@types/node": "^26.6.6",
+    "typescript": "^7.0.2"
+  },
+  "type": "module",
+  "bin": {
+    "eclass-mcp": "dist/index.js"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "files": [
+    "dist",
+    "demo",
+    "README.md",
+    "LICENSE"
+  ]
+}
