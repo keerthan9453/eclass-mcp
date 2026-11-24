@@ -24,7 +24,26 @@ Pick whichever setup York allows. They can be combined.
 In eClass: **Calendar → Import or export calendars → Export** → pick "All courses" + a time range → *Get calendar URL*. Copy it.
 
 ### B. Web service token
-Try `https://eclass.yorku.ca/admin/tool/mobile/launch.php?service=moodle_mobile_app&passport=1&urlscheme=moodlemobile` while signed in. If York allows the mobile service, the browser tries to open a `moodlemobile://token=…` link containing base64 data of the form `siteid:::token`. The part after `:::` is your token. If it's blocked, use setup A only. `check_connection` tells you whether a token works.
+
+Gets you courses, assignments, grades, course contents and deadlines. It works only if your school allows Moodle's mobile service (York does). Use **Chrome, Brave or Edge**: Safari doesn't show the request you need.
+
+1. Sign in to eClass in Chrome. Open DevTools (Cmd+Option+I, or F12) → **Network**, and tick **Preserve log**.
+2. In the same tab, open:
+   `https://eclass.yorku.ca/admin/tool/mobile/launch.php?service=moodle_mobile_app&passport=12345&urlscheme=moodlemobile`
+   The page appears to fail ("Unsupported URL scheme" or "invalid address"). That means it worked: eClass redirected to a `moodlemobile://token=…` link, which only the Moodle mobile app can open.
+3. In the Network list, find the request whose name starts with `moodlemobile://token=`. Right-click it → **Copy → Copy URL**. (If it isn't listed, click the `launch.php` row and read the `Location` header.)
+4. Turn that link into your token. Run this in Terminal, paste the link when asked (nothing shows as you paste), and press Return:
+   ```bash
+   printf 'Paste link: '; read -rs L; echo; node -e "console.log(Buffer.from(process.argv[1].trim().split('token=').pop(),'base64').toString().split(':::')[1])" "$L"
+   ```
+   It prints a 32-character string. That is your `ECLASS_WS_TOKEN`.
+5. Put it in your MCP client config (below). Don't paste it into chat, issues or commits.
+
+**It didn't work?**
+- *A Moodle error page ("Web service is not available")* means your school has the mobile service off. Use setup A.
+- *Nothing in the Network list* means the page was opened before DevTools. Reload it with DevTools open and Preserve log on.
+- Safari reports "address is invalid" and shows no request, so switch to Chrome.
+- If `check_connection` later returns an HTML page with HTTP 202, a firewall is challenging the request. The server already uses your system `curl` to avoid this (see *Firewall note*).
 
 ### Claude Desktop / any MCP client config
 ```json
