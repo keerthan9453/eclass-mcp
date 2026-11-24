@@ -58,7 +58,7 @@ function curlRequest(url: string, body?: string): Promise<Resp> {
     const args = ["-sS", "-L", "--max-time", String(TIMEOUT_MS / 1000), "-K", "-",
       "-w", "\n%{http_code}\t%{content_type}\t%{url_effective}"];
     // URL and body go via the config on stdin so they never appear in `ps`
-    let input = cfg("url", url) + cfg("user-agent", UA);
+    let input = cfg("url", url); // curl keeps its own default User-Agent
     if (body !== undefined) input += cfg("request", "POST") + cfg("data", body) + cfg("header", "content-type: application/x-www-form-urlencoded");
     const child = spawn("curl", args, { stdio: ["pipe", "pipe", "pipe"] });
     let out = "", err = "";
