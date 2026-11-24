@@ -54,7 +54,7 @@ Claude Code: `claude mcp add eclass -e ECLASS_ICS_URL=... -- npx -y github:keert
 | `get_course_contents(course_id)` | token | Sections, resources, activities |
 
 ## Environment variables
-`ECLASS_ICS_URL`, `ECLASS_WS_TOKEN`, `ECLASS_BASE_URL` (default `https://eclass.yorku.ca`), `ECLASS_TIMEOUT_MS` (default 15000).
+`ECLASS_ICS_URL`, `ECLASS_WS_TOKEN`, `ECLASS_BASE_URL` (default `https://eclass.yorku.ca`), `ECLASS_TIMEOUT_MS` (default 15000), `ECLASS_TRANSPORT` (`curl` default, or `fetch`).
 
 ## Scenarios handled
 - No config → only the calendar tool shows, with an error saying what to set
@@ -64,6 +64,9 @@ Claude Code: `claude mcp add eclass -e ECLASS_ICS_URL=... -- npx -y github:keert
 - `http://` to a non-local host → refused so credentials aren't sent in clear text
 - Course with no assignments/grades, assignments with no due date → handled
 - Schulich courses live on Canvas, not eClass, so they won't appear
+
+## Firewall note
+York's front end may answer Node's built-in `fetch` with an HTML bot-challenge page (HTTP 202) while accepting `curl`. The server therefore sends requests through your system `curl` by default (needs `curl` on PATH, which macOS and most Linux have). Set `ECLASS_TRANSPORT=fetch` to force Node's fetch.
 
 ## Security
 The ICS URL and token grant access to your account. Keep them in your MCP client's `env`, never commit them. The server never writes to eClass.

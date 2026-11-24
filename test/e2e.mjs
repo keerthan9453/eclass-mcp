@@ -86,6 +86,8 @@ await test("all tools exposed when token set", () =>
   withServer(WS, async (c) => {
     assert.deepEqual(await names(c), ["check_connection", "get_assignments", "get_course_contents", "get_grades", "get_upcoming_deadlines", "list_courses"]);
   }));
+await test("fetch transport still works (ECLASS_TRANSPORT=fetch)", () =>
+  withServer({ ...WS, ECLASS_TRANSPORT: "fetch" }, async (c) => { assert.match((await call(c, "check_connection")).text, /Demo Student/); }));
 await test("check_connection shows site + user", () =>
   withServer(WS, async (c) => { assert.match((await call(c, "check_connection")).text, /Demo Student/); }));
 await test("list_courses", () =>

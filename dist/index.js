@@ -2,6 +2,7 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
+import { spawn } from "node:child_process";
 import ical from "node-ical";
 // `--demo`: run against a built-in fake eClass so you can try the tools without any credentials.
 if (process.argv.includes("--demo")) {
@@ -45,6 +46,56 @@ const scrub = (m) => {
 };
 const text = (s) => ({ content: [{ type: "text", text: s }] });
 const fail = (s) => ({ content: [{ type: "text", text: s }], isError: true });
+// ---- HTTP transport ----
+// York's front-end firewall challenges Node's built-in fetch but accepts curl, so by default
+// requests go through the system `curl` binary (falls back to fetch if curl is missing).
+// Secrets (token, ICS URL) are passed on stdin, never on the command line.
+const UA = "eclass-mcp/0.1 (+https://github.com/keerthan9453/eclass-mcp)";
+function curlRequest(url, body) {
+    return new Promise((resolve, reject) => {
+        const cfg = (k, v) => `${k} = "${v.replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"\n`;
+        const args = ["-sS", "-L", "--max-time", String(TIMEOUT_MS / 1000), "-K", "-",
+            "-w", "\n%{http_code}\t%{content_type}\t%{url_effective}"];
+        // URL and body go via the config on stdin so they never appear in `ps`
+        let input = cfg("url", url) + cfg("user-agent", UA);
+        if (body !== undefined)
+            input += cfg("request", "POST") + cfg("data", body) + cfg("header", "content-type: application/x-www-form-urlencoded");
+        const child = spawn("curl", args, { stdio: ["pipe", "pipe", "pipe"] });
+        let out = "", err = "";
+        child.stdout.on("data", (d) => (out += d));
+        child.stderr.on("data", (d) => (err += d));
+        child.on("error", (e) => reject(Object.assign(new Error(e.code === "ENOENT" ? "curl not found" : String(e.message)), { noCurl: e.code === "ENOENT" })));
+        child.on("close", (code) => {
+            if (code !== 0)
+                return reject(new Error(`curl failed (exit ${code}): ${err.trim().split("\n").pop()}`));
+            const i = out.lastIndexOf("\n");
+            const [status, contentType, finalUrl] = out.slice(i + 1).split("\t");
+            resolve({ status: Number(status), contentType: contentType || "unknown", finalUrl: finalUrl || url, text: out.slice(0, i) });
+        });
+        child.stdin.end(input);
+    });
+}
+async function fetchRequest(url, body) {
+    const res = await fetch(url, {
+        method: body === undefined ? "GET" : "POST",
+        body,
+        headers: { "user-agent": UA, ...(body === undefined ? {} : { "content-type": "application/x-www-form-urlencoded" }) },
+        signal: AbortSignal.timeout(TIMEOUT_MS),
+    });
+    return { status: res.status, contentType: res.headers.get("content-type") ?? "unknown", finalUrl: res.url, text: await res.text() };
+}
+async function httpRequest(url, body) {
+    if ((process.env.ECLASS_TRANSPORT ?? "curl") === "fetch")
+        return fetchRequest(url, body);
+    try {
+        return await curlRequest(url, body);
+    }
+    catch (e) {
+        if (e.noCurl)
+            return fetchRequest(url, body);
+        throw e;
+    }
+}
 // ---- Moodle web service helper (read-only) ----
 async function ws(wsfunction, params = {}) {
     if (!TOKEN)
@@ -56,26 +107,20 @@ async function ws(wsfunction, params = {}) {
         moodlewsrestformat: "json",
         ...Object.fromEntries(Object.entries(params).map(([k, v]) => [k, String(v)])),
     });
-    const res = await fetch(`${BASE}/webservice/rest/server.php`, {
-        method: "POST",
-        body: form,
-        signal: AbortSignal.timeout(TIMEOUT_MS),
-        headers: { "user-agent": "eclass-mcp/0.1 (+https://github.com/keerthan9453/eclass-mcp)" },
-    });
-    const ctype = res.headers.get("content-type") ?? "unknown";
-    const raw = await res.text();
+    const res = await httpRequest(`${BASE}/webservice/rest/server.php`, form.toString());
+    const raw = res.text;
     const snippet = raw.replace(/<script[\s\S]*?<\/script>|<style[\s\S]*?<\/style>|<[^>]+>/g, " ").replace(/\s+/g, " ").trim().slice(0, 160);
     let data;
     try {
         data = JSON.parse(raw);
     }
     catch {
-        const host = new URL(res.url).host;
-        throw new Error(`eClass did not return JSON (HTTP ${res.status}, ${ctype}, ended at ${host}${new URL(res.url).pathname}). ` +
+        const u = new URL(res.finalUrl);
+        throw new Error(`eClass did not return JSON (HTTP ${res.status}, ${res.contentType}, ended at ${u.host}${u.pathname}). ` +
             `Likely causes: a login/SSO redirect, a bot-protection challenge, a wrong ECLASS_BASE_URL, or web services disabled. ` +
             `Page text: "${snippet}"`);
     }
-    if (!res.ok && !data?.exception)
+    if (!(res.status >= 200 && res.status < 300) && !data?.exception)
         throw new Error(`HTTP ${res.status} from eClass web service`);
     if (data?.exception)
         throw new Error(`${data.errorcode}: ${data.message}`);
@@ -92,10 +137,10 @@ server.registerTool("get_upcoming_deadlines", {
         return fail("ECLASS_ICS_URL is not set. Export it from eClass: Calendar > Import or export calendars.");
     try {
         assertSafeUrl(ICS_URL, "ECLASS_ICS_URL");
-        const res = await fetch(ICS_URL, { signal: AbortSignal.timeout(TIMEOUT_MS) });
-        if (!res.ok)
-            throw new Error(`HTTP ${res.status} (the export URL may have been regenerated or expired)`);
-        const body = await res.text();
+        const res = await httpRequest(ICS_URL);
+        if (!(res.status >= 200 && res.status < 300))
+            throw new Error(`HTTP ${res.status} (the export URL may have been regenerated or expired, or blocked by a firewall challenge)`);
+        const body = res.text;
         if (!body.includes("BEGIN:VCALENDAR"))
             throw new Error("Response was not an ICS calendar (got a login page?).");
         const events = ical.sync.parseICS(body);
