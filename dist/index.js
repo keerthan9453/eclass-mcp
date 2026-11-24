@@ -130,11 +130,28 @@ const fmtDate = (d) => new Date(d).toLocaleString("en-CA", { timeZone: "America/
 const server = new McpServer({ name: "eclass", version: "0.1.0" });
 // ---- ICS tools ----
 server.registerTool("get_upcoming_deadlines", {
-    description: "List upcoming eClass calendar events (assignment due dates, quizzes) from the exported ICS feed.",
+    description: "List upcoming eClass deadlines (assignments, quizzes). Uses the web service token if set, otherwise the exported ICS calendar feed.",
     inputSchema: { days: z.number().int().min(1).max(365).default(14).describe("How many days ahead to look") },
 }, async ({ days }) => {
+    if (TOKEN) {
+        try {
+            const now = Math.floor(Date.now() / 1000);
+            const r = await ws("core_calendar_get_action_events_by_timesort", {
+                timesortfrom: now, timesortto: now + days * 86400, limitnum: 50,
+            });
+            const rows = (r.events ?? [])
+                .sort((a, b) => a.timesort - b.timesort)
+                .map((e) => `${fmtDate(e.timesort * 1000)} — ${e.name}${e.course?.shortname ? ` [${e.course.shortname}]` : ""}`);
+            return text(rows.length ? rows.join("\n") : `No events in the next ${days} days.`);
+        }
+        catch (e) {
+            if (!ICS_URL)
+                return fail(scrub(String(e.message)));
+            // otherwise fall through to the ICS feed
+        }
+    }
     if (!ICS_URL)
-        return fail("ECLASS_ICS_URL is not set. Export it from eClass: Calendar > Import or export calendars.");
+        return fail("Set ECLASS_WS_TOKEN, or ECLASS_ICS_URL (eClass: Calendar > Import or export calendars > Export).");
     try {
         assertSafeUrl(ICS_URL, "ECLASS_ICS_URL");
         const res = await httpRequest(ICS_URL);

@@ -49,6 +49,11 @@ export function startMock() {
         return json({ exception: "moodle_exception", errorcode: "invalidtoken", message: `Invalid token - token not found (${p.get("wstoken")})` });
       const f = p.get("wsfunction"), cid = Number(p.get("courseid") ?? p.get("courseids[0]"));
       if (f === "core_webservice_get_site_info") return json({ sitename: "York eClass (mock)", fullname: "Demo Student", userid: 42, release: "4.1 (mock)" });
+      if (f === "core_calendar_get_action_events_by_timesort") {
+        const from = Number(p.get("timesortfrom")), to = Number(p.get("timesortto"));
+        const all = [["Sprint 1 Report is due", now + 2 * day, "EECS2311"], ["Problem Set 4 is due", now + 5 * day, "MATH1025"], ["Final Demo is due", now + 20 * day, "EECS2311"]];
+        return json({ events: all.filter(([, t]) => t >= from && t <= to).map(([name, timesort, shortname]) => ({ name, timesort, course: { shortname } })) });
+      }
       if (f === "core_enrol_get_users_courses") return json(p.get("userid") === "42" ? courses : []);
       if (f === "mod_assign_get_assignments") return json({ courses: [{ id: cid, assignments: assignments[cid] ?? [] }] });
       if (f === "gradereport_user_get_grade_items") return json({ usergrades: [{ gradeitems: grades[cid] ?? [] }] });

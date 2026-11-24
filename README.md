@@ -46,7 +46,7 @@ Claude Code: `claude mcp add eclass -e ECLASS_ICS_URL=... -- npx -y github:keert
 ## Tools
 | Tool | Needs | Description |
 |---|---|---|
-| `get_upcoming_deadlines(days)` | ICS | Events in the next N days (1–365, default 14) |
+| `get_upcoming_deadlines(days)` | token or ICS | Deadlines in the next N days (1–365, default 14). Uses the token if set, else the calendar feed |
 | `check_connection` | token | Confirms the token works; shows your name |
 | `list_courses` | token | Enrolled courses with ids |
 | `get_assignments(course_id)` | token | Assignments and due dates |
