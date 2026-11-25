@@ -7,7 +7,7 @@
 import { spawn, execFile } from "node:child_process";
 import { createHash, randomBytes } from "node:crypto";
 import { existsSync } from "node:fs";
-import { chmod, copyFile, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { chmod, copyFile, mkdir, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { promisify } from "node:util";
@@ -146,9 +146,51 @@ async function openInBrowser(url, choice) {
     }
     throw new Error(choice ? `${choice} does not seem to be installed.` : "No supported browser found.");
 }
-async function waitForFile(path, ms) {
-    const end = Date.now() + ms;
+// Fixed place for the helper, so a run that was interrupted can't leave a second copy catching the link.
+const SETUP_DIR = () => join(homedir(), "Library/Application Support/eclass-mcp/setup");
+/** Remove helpers left by earlier interrupted runs (old versions used temp folders). */
+async function removeStaleHelpers() {
+    const dirs = [SETUP_DIR()];
+    for (const n of await readdir(tmpdir()).catch(() => []))
+        if (n.startsWith("eclass-mcp-setup-"))
+            dirs.push(join(tmpdir(), n));
+    for (const d of dirs) {
+        const app = join(d, `${APP_NAME}.app`);
+        if (existsSync(app))
+            await run(LSREGISTER, ["-u", app]).catch(() => undefined);
+        await rm(d, { recursive: true, force: true }).catch(() => undefined);
+    }
+}
+// AppleScript names for browsers whose current tab we can point at a URL.
+const TAB_SCRIPT = {
+    chrome: (u) => `tell application "Google Chrome" to set URL of active tab of front window to "${u}"`,
+    brave: (u) => `tell application "Brave Browser" to set URL of active tab of front window to "${u}"`,
+    edge: (u) => `tell application "Microsoft Edge" to set URL of active tab of front window to "${u}"`,
+    vivaldi: (u) => `tell application "Vivaldi" to set URL of active tab of front window to "${u}"`,
+    safari: (u) => `tell application "Safari" to set URL of current tab of front window to "${u}"`,
+};
+/** Load url in the browser's current (signed-in) tab. Returns false if that isn't possible. */
+async function openInSameTab(browser, url) {
+    const script = TAB_SCRIPT[browser];
+    if (!script)
+        return false;
+    try {
+        await run("osascript", ["-e", script(url)]);
+        return true;
+    }
+    catch {
+        return false;
+    }
+}
+async function waitForFile(path, ms, onTick) {
+    const start = Date.now(), end = start + ms;
+    let lastTick = 0;
     while (Date.now() < end) {
+        const sec = Math.floor((Date.now() - start) / 1000);
+        if (onTick && sec !== lastTick) {
+            lastTick = sec;
+            await onTick(sec);
+        }
         if (existsSync(path)) {
             const t = (await readFile(path, "utf8")).trim();
             if (t.includes("token="))
@@ -177,8 +219,18 @@ export async function runSetup(argv) {
             link = testLink;
         }
         else {
-            work = await mkdtemp(join(tmpdir(), "eclass-mcp-setup-"));
+            await removeStaleHelpers();
+            work = SETUP_DIR();
+            await mkdir(work, { recursive: true });
             const inbox = join(work, "link.txt");
+            const cleanupOnCtrlC = async () => {
+                if (app)
+                    await run(LSREGISTER, ["-u", app]).catch(() => undefined);
+                await rm(work, { recursive: true, force: true }).catch(() => undefined);
+                say("\nSetup cancelled.");
+                process.exit(130);
+            };
+            process.once("SIGINT", cleanupOnCtrlC);
             hadMoodleApp = await moodleAppInstalled();
             if (hadMoodleApp)
                 say("Note: the Moodle app is installed. If it opens instead of the setup helper, close it and run setup again.\n");
@@ -191,23 +243,32 @@ export async function runSetup(argv) {
             if (used === "safari")
                 say("        Safari usually can't hand the token over. If step 2 fails, install Chrome, Brave or Firefox and run setup again.");
             const rl = createInterface({ input: process.stdin, output: process.stdout });
-            await rl.question("        Press Return here once you're signed in... ");
+            await rl.question("        Keep that tab in front, then press Return here... ");
             rl.close();
-            // Step 2: open the token link in the same browser.
-            say(`\nStep 2. Opening the token link in ${nice}.`);
+            // Step 2: load the token link in the same signed-in tab.
+            say(`\nStep 2. Loading the token link in your signed-in ${nice} tab.`);
+            const sameTab = await openInSameTab(used, launch);
+            if (!sameTab)
+                await run("open", ["-b", bundleId, launch]).catch(() => undefined);
             say(`        When ${nice} asks to open "${APP_NAME}", click Open (or Allow).`);
-            say("        If nothing opens, paste this link into the same browser's address bar:");
+            if (sameTab)
+                say("        (If macOS asks whether Terminal may control " + nice + ", click OK.)");
+            say("        If nothing happens, paste this link into the signed-in eClass tab:");
             say(`        ${launch}`);
             say("        Waiting up to 2 minutes...\n");
-            await run("open", ["-b", bundleId, launch]).catch(() => undefined);
-            const hint = setTimeout(() => say("        Still waiting. If the browser showed an error instead of asking to open \"" + APP_NAME + "\",\n" +
-                "        press Ctrl+C and run setup again with another browser, e.g. --browser firefox.\n"), 45_000);
-            try {
-                link = await waitForFile(inbox, 2 * 60_000);
-            }
-            finally {
-                clearTimeout(hint);
-            }
+            link = await waitForFile(inbox, 2 * 60_000, async (sec) => {
+                if (sec === 30) {
+                    // Re-check: make sure our helper is still the one macOS hands the link to.
+                    say("        No token yet after 30 seconds. Re-registering the helper and checking again...");
+                    await run(LSREGISTER, ["-f", app]).catch(() => undefined);
+                    await setDefaultHandler(BUNDLE_ID);
+                    say("        Paste the link above into the signed-in tab now, and click Open when asked.\n");
+                }
+                if (sec === 75)
+                    say("        Still waiting. If the browser shows an error instead of asking to open \"" + APP_NAME + "\",\n" +
+                        "        press Ctrl+C and run setup again with another browser, e.g. --browser chrome.\n");
+            });
+            process.removeListener("SIGINT", cleanupOnCtrlC);
         }
         const { token, signatureOk } = decodeLaunchLink(link, site, passport);
         if (!signatureOk)
