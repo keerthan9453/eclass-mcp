@@ -25,6 +25,16 @@ In eClass: **Calendar → Import or export calendars → Export** → pick "All 
 
 ### B. Web service token
 
+**Easiest (macOS): one command, no DevTools**
+```bash
+npx -y github:keerthan9453/eclass-mcp setup
+```
+Your browser opens eClass. Sign in if asked, and when the browser asks to open **"eClass MCP Login"**, click **Open**. Setup checks the token, adds the `eclass` server to your Claude Desktop config (keeping your other servers and saving a `.bak` backup), and removes its helper. The token is never shown. Then quit Claude (Cmd+Q) and reopen it.
+
+Options: `--site https://your.moodle.site`, `--config /path/to/config.json`.
+
+**Manual steps** (Windows/Linux, or if the setup command doesn't work):
+
 Gets you courses, assignments, grades, course contents and deadlines. It works only if your school allows Moodle's mobile service (York does). Use **Chrome, Brave or Edge**: Safari doesn't show the request you need.
 
 1. Sign in to eClass in Chrome. Open DevTools (Cmd+Option+I, or F12) → **Network**, and tick **Preserve log**.
@@ -102,7 +112,7 @@ The ICS URL and token grant access to your account. Keep them in your MCP client
 ## Development
 ```bash
 npm install
-npm test     # builds and runs 40 end-to-end scenarios against a mock eClass
+npm test     # builds and runs 46 end-to-end scenarios against a mock eClass
 npm run demo # scripted walkthrough
 ```
 `dist/` is committed so `npx github:...` works without a build step. Run `npm run build` before committing source changes.

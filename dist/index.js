@@ -7,6 +7,11 @@ import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import ical from "node-ical";
+// `setup`: guided token setup (see src/setup.ts). Runs instead of the MCP server.
+if (process.argv[2] === "setup") {
+    const { runSetup } = await import("./setup.js");
+    process.exit(await runSetup(process.argv.slice(3)));
+}
 // `--demo`: run against a built-in fake eClass so you can try the tools without any credentials.
 if (process.argv.includes("--demo")) {
     const { startMock, GOOD_TOKEN } = await import("../demo/mock-eclass.mjs");
