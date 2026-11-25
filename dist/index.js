@@ -3,6 +3,9 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
 import { spawn } from "node:child_process";
+import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import ical from "node-ical";
 // `--demo`: run against a built-in fake eClass so you can try the tools without any credentials.
 if (process.argv.includes("--demo")) {
@@ -126,6 +129,82 @@ async function ws(wsfunction, params = {}) {
         throw new Error(`${data.errorcode}: ${data.message}`);
     return data;
 }
+// ---- Binary download (course files) ----
+const MAX_FILE_MB = Number(process.env.ECLASS_MAX_FILE_MB ?? 25);
+async function curlDownload(url) {
+    const dir = await mkdtemp(join(tmpdir(), "eclass-mcp-"));
+    const out = join(dir, "file");
+    try {
+        const cfg = (k, v) => `${k} = "${v.replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"\n`;
+        const meta = await new Promise((resolve, reject) => {
+            const child = spawn("curl", ["-sS", "-L", "--max-time", String(Math.max(60, TIMEOUT_MS / 1000)),
+                "--max-filesize", String(Math.max(1, Math.floor(MAX_FILE_MB * 1024 * 1024))), "-K", "-", "-w", "%{http_code}\t%{content_type}"]);
+            let o = "", e = "";
+            child.stdout.on("data", (d) => (o += d));
+            child.stderr.on("data", (d) => (e += d));
+            child.on("error", (err) => reject(Object.assign(new Error(err.code === "ENOENT" ? "curl not found" : String(err.message)), { noCurl: err.code === "ENOENT" })));
+            child.on("close", (code) => code === 0 ? resolve(o)
+                : reject(new Error(code === 63 ? `File is larger than ${MAX_FILE_MB} MB (ECLASS_MAX_FILE_MB).` : `curl failed (exit ${code}): ${e.trim().split("\n").pop()}`)));
+            child.stdin.end(cfg("url", url) + cfg("output", out));
+        });
+        const [status, contentType] = meta.split("\t");
+        return { status: Number(status), contentType: contentType || "unknown", bytes: await readFile(out) };
+    }
+    finally {
+        await rm(dir, { recursive: true, force: true });
+    }
+}
+async function fetchDownload(url) {
+    const res = await fetch(url, { headers: { "user-agent": UA }, signal: AbortSignal.timeout(Math.max(60000, TIMEOUT_MS)) });
+    const bytes = Buffer.from(await res.arrayBuffer());
+    if (bytes.length > MAX_FILE_MB * 1024 * 1024)
+        throw new Error(`File is larger than ${MAX_FILE_MB} MB (ECLASS_MAX_FILE_MB).`);
+    return { status: res.status, contentType: res.headers.get("content-type") ?? "unknown", bytes };
+}
+async function downloadFile(url) {
+    if ((process.env.ECLASS_TRANSPORT ?? "curl") === "fetch")
+        return fetchDownload(url);
+    try {
+        return await curlDownload(url);
+    }
+    catch (e) {
+        if (e.noCurl)
+            return fetchDownload(url);
+        throw e;
+    }
+}
+// Only ever send the token to this eClass site's own file endpoint.
+function eclassFileUrl(raw) {
+    const base = assertSafeUrl(BASE, "ECLASS_BASE_URL");
+    let u;
+    try {
+        u = new URL(raw);
+    }
+    catch {
+        throw new Error("file_url is not a valid URL. Use a file_url from list_course_files.");
+    }
+    if (u.origin !== base.origin || !/\/(webservice\/)?pluginfile\.php\//.test(u.pathname))
+        throw new Error("file_url must be an eClass file link from list_course_files (refusing to send the token elsewhere).");
+    u.pathname = u.pathname.replace(/^(.*?)\/pluginfile\.php\//, (m, pre) => pre.endsWith("/webservice") ? m : `${pre}/webservice/pluginfile.php/`);
+    u.searchParams.delete("token");
+    u.searchParams.set("token", TOKEN);
+    return u;
+}
+function parsePages(spec, total) {
+    if (!spec)
+        return Array.from({ length: total }, (_, i) => i + 1);
+    const set = new Set();
+    for (const part of spec.split(",")) {
+        const m = part.trim().match(/^(\d+)(?:-(\d+))?$/);
+        if (!m)
+            throw new Error(`Bad pages value "${spec}". Use e.g. "1-3,7".`);
+        const a = Number(m[1]), b = Number(m[2] ?? m[1]);
+        for (let i = Math.max(1, a); i <= Math.min(total, b); i++)
+            set.add(i);
+    }
+    return [...set].sort((x, y) => x - y);
+}
+const TEXT_TYPES = /^(text\/|application\/(json|xml|csv))/;
 const fmtDate = (d) => new Date(d).toLocaleString("en-CA", { timeZone: "America/Toronto", dateStyle: "medium", timeStyle: "short" });
 const server = new McpServer({ name: "eclass", version: "0.1.0" });
 // ---- ICS tools ----
@@ -222,6 +301,71 @@ if (TOKEN) {
             return text(items
                 .map((g) => `${g.itemname ?? "Course total"}: ${g.gradeformatted ?? "-"} (range ${g.grademin}-${g.grademax})`)
                 .join("\n") || "No grades.");
+        }
+        catch (e) {
+            return fail(scrub(String(e.message)));
+        }
+    });
+    server.registerTool("list_course_files", {
+        description: "List the files (PDFs, slides, documents) attached to a course's resources and folders, with a file_url to pass to read_course_file.",
+        inputSchema: { course_id: z.number().int(), name_contains: z.string().optional().describe("Only files whose name or activity contains this text (case-insensitive)") },
+    }, async ({ course_id, name_contains }) => {
+        try {
+            const sections = await ws("core_course_get_contents", { courseid: course_id });
+            const q = name_contains?.toLowerCase();
+            const rows = [];
+            for (const s of sections)
+                for (const m of s.modules ?? [])
+                    for (const f of m.contents ?? []) {
+                        if (f.type !== "file" || !f.fileurl)
+                            continue;
+                        const label = `${s.name} / ${m.name} / ${f.filename}`;
+                        if (q && !label.toLowerCase().includes(q))
+                            continue;
+                        const kb = f.filesize ? ` ${(f.filesize / 1024).toFixed(0)} KB` : "";
+                        rows.push(`- ${label} (${f.mimetype ?? "unknown"}${kb})\n  file_url: ${f.fileurl}`);
+                    }
+            return text(rows.length ? rows.join("\n") : "No downloadable files found" + (q ? ` matching "${name_contains}".` : "."));
+        }
+        catch (e) {
+            return fail(scrub(String(e.message)));
+        }
+    });
+    server.registerTool("read_course_file", {
+        description: "Download an eClass course file and return its text. Supports PDFs (text layer only, no OCR) and plain-text formats. Use pages to read part of a long PDF.",
+        inputSchema: {
+            file_url: z.string().describe("A file_url from list_course_files"),
+            pages: z.string().optional().describe('PDF pages to read, e.g. "1-3,7". Default: all'),
+            max_chars: z.number().int().min(500).max(100000).default(20000).describe("Truncate the returned text to this many characters"),
+        },
+    }, async ({ file_url, pages, max_chars }) => {
+        try {
+            const url = eclassFileUrl(file_url);
+            const res = await downloadFile(url.toString());
+            const head = res.bytes.subarray(0, 5).toString("latin1");
+            if (res.status < 200 || res.status >= 300)
+                throw new Error(`HTTP ${res.status} downloading file`);
+            let out;
+            if (head === "%PDF-") {
+                const { getDocumentProxy, extractText } = await import("unpdf");
+                const pdf = await getDocumentProxy(new Uint8Array(res.bytes));
+                const { totalPages, text: per } = await extractText(pdf, { mergePages: false });
+                const want = parsePages(pages, totalPages);
+                const body = want.map((n) => `--- page ${n} ---\n${per[n - 1].trim()}`).join("\n\n");
+                if (!body.replace(/--- page \d+ ---/g, "").trim())
+                    return text(`PDF has ${totalPages} pages but no text layer (probably scanned images). OCR is not supported.`);
+                out = `PDF, ${totalPages} pages (showing ${want.length}).\n\n${body}`;
+            }
+            else if (TEXT_TYPES.test(res.contentType) || /\.(txt|md|csv|json|xml|html?)$/i.test(url.pathname)) {
+                const t = res.bytes.toString("utf8");
+                if (/^\s*\{\s*"(error|exception)"/.test(t))
+                    throw new Error(JSON.parse(t).error ?? JSON.parse(t).message ?? "eClass refused the file");
+                out = res.contentType.includes("html") ? t.replace(/<script[\s\S]*?<\/script>|<style[\s\S]*?<\/style>|<[^>]+>/g, " ").replace(/[ \t]+/g, " ") : t;
+            }
+            else {
+                return fail(`Unsupported file type (${res.contentType}). Only PDFs and text files can be read for now.`);
+            }
+            return text(out.length > max_chars ? out.slice(0, max_chars) + `\n\n[truncated at ${max_chars} of ${out.length} chars; use pages or max_chars]` : out);
         }
         catch (e) {
             return fail(scrub(String(e.message)));

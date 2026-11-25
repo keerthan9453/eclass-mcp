@@ -71,9 +71,11 @@ Claude Code: `claude mcp add eclass -e ECLASS_ICS_URL=... -- npx -y github:keert
 | `get_assignments(course_id)` | token | Assignments and due dates |
 | `get_grades(course_id)` | token | Your grade items |
 | `get_course_contents(course_id)` | token | Sections, resources, activities |
+| `list_course_files(course_id, name_contains?)` | token | Files in a course (PDFs, slides, docs) with a `file_url` |
+| `read_course_file(file_url, pages?, max_chars?)` | token | Text of a PDF or text file. PDFs need a text layer (no OCR); `.pptx`/`.docx` not yet supported |
 
 ## Environment variables
-`ECLASS_ICS_URL`, `ECLASS_WS_TOKEN`, `ECLASS_BASE_URL` (default `https://eclass.yorku.ca`), `ECLASS_TIMEOUT_MS` (default 15000), `ECLASS_TRANSPORT` (`curl` default, or `fetch`).
+`ECLASS_ICS_URL`, `ECLASS_WS_TOKEN`, `ECLASS_BASE_URL` (default `https://eclass.yorku.ca`), `ECLASS_TIMEOUT_MS` (default 15000), `ECLASS_TRANSPORT` (`curl` default, or `fetch`), `ECLASS_MAX_FILE_MB` (default 25).
 
 ## Scenarios handled
 - No config → only the calendar tool shows, with an error saying what to set
@@ -87,13 +89,16 @@ Claude Code: `claude mcp add eclass -e ECLASS_ICS_URL=... -- npx -y github:keert
 ## Firewall note
 York's front end may answer Node's built-in `fetch` with an HTML bot-challenge page (HTTP 202) while accepting `curl`. The server therefore sends requests through your system `curl` by default (needs `curl` on PATH, which macOS and most Linux have). Set `ECLASS_TRANSPORT=fetch` to force Node's fetch.
 
+## Course files
+`read_course_file` downloads the file to a temporary folder, extracts the text, and deletes the copy. The token is only ever sent to your eClass site's own file endpoint; any other URL is refused. Course materials are your instructors' work: read them for your own study, don't redistribute them.
+
 ## Security
 The ICS URL and token grant access to your account. Keep them in your MCP client's `env`, never commit them. The server never writes to eClass.
 
 ## Development
 ```bash
 npm install
-npm test     # builds and runs 22 end-to-end scenarios against a mock eClass
+npm test     # builds and runs 35 end-to-end scenarios against a mock eClass
 npm run demo # scripted walkthrough
 ```
 `dist/` is committed so `npx github:...` works without a build step. Run `npm run build` before committing source changes.

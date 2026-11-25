@@ -84,7 +84,7 @@ console.log("Moodle web service (token)");
 const WS = { ECLASS_BASE_URL: base, ECLASS_WS_TOKEN: GOOD_TOKEN };
 await test("all tools exposed when token set", () =>
   withServer(WS, async (c) => {
-    assert.deepEqual(await names(c), ["check_connection", "get_assignments", "get_course_contents", "get_grades", "get_upcoming_deadlines", "list_courses"]);
+    assert.deepEqual(await names(c), ["check_connection", "get_assignments", "get_course_contents", "get_grades", "get_upcoming_deadlines", "list_course_files", "list_courses", "read_course_file"]);
   }));
 await test("fetch transport still works (ECLASS_TRANSPORT=fetch)", () =>
   withServer({ ...WS, ECLASS_TRANSPORT: "fetch" }, async (c) => { assert.match((await call(c, "check_connection")).text, /Demo Student/); }));
@@ -130,6 +130,69 @@ await test("token over plain http to a non-local host is refused", () =>
 await test("unreachable host → error, no hang", () =>
   withServer({ ECLASS_BASE_URL: "http://127.0.0.1:9", ECLASS_WS_TOKEN: "t", ECLASS_TIMEOUT_MS: "1000" }, async (c) => {
     assert.ok((await call(c, "list_courses")).err);
+  }));
+
+console.log("Course files");
+const fileUrl = async (c, name) => (await call(c, "list_course_files", { course_id: 101 })).text.split("\n").find((l, i, a) => a[i - 1]?.includes(name))?.trim().replace("file_url: ", "");
+await test("list_course_files lists files with urls, filter works", () =>
+  withServer(WS, async (c) => {
+    const r = await call(c, "list_course_files", { course_id: 101 });
+    assert.match(r.text, /Syllabus.pdf \/ syllabus.pdf \(application\/pdf/); assert.match(r.text, /file_url: http/);
+    assert.ok(!r.text.includes(GOOD_TOKEN), "token must not appear in listing");
+    const f = await call(c, "list_course_files", { course_id: 101, name_contains: "notes" });
+    assert.equal(f.text.split("\n").length, 2, f.text);
+    assert.match((await call(c, "list_course_files", { course_id: 102 })).text, /No downloadable files/);
+  }));
+await test("read_course_file extracts PDF text, all pages and page ranges", () =>
+  withServer(WS, async (c) => {
+    const u = await fileUrl(c, "syllabus.pdf");
+    const all = await call(c, "read_course_file", { file_url: u });
+    assert.ok(!all.err, all.text); assert.match(all.text, /2 pages/); assert.match(all.text, /Midterm Test: October 21, 2026/);
+    const p2 = await call(c, "read_course_file", { file_url: u, pages: "2" });
+    assert.ok(!/Instructor/.test(p2.text) && /Important Dates/.test(p2.text), p2.text);
+  }));
+await test("read_course_file works over fetch transport too", () =>
+  withServer({ ...WS, ECLASS_TRANSPORT: "fetch" }, async (c) => {
+    assert.match((await call(c, "read_course_file", { file_url: await fileUrl(c, "syllabus.pdf") })).text, /Final Exam/);
+  }));
+await test("max_chars truncates with a note", () =>
+  withServer(WS, async (c) => {
+    const r = await call(c, "read_course_file", { file_url: await fileUrl(c, "syllabus.pdf"), max_chars: 500 });
+    assert.ok(r.text.length < 700 || /truncated/.test(r.text), r.text);
+  }));
+await test("scanned PDF (no text layer) is reported, not crashed", () =>
+  withServer(WS, async (c) => {
+    const r = await call(c, "read_course_file", { file_url: await fileUrl(c, "scan.pdf") });
+    assert.ok(!r.err); assert.match(r.text, /no text layer/);
+  }));
+await test("plain text file is read", () =>
+  withServer(WS, async (c) => { assert.match((await call(c, "read_course_file", { file_url: await fileUrl(c, "notes.txt") })).text, /bring a laptop/); }));
+await test("unsupported type (pptx) gives a clear error", () =>
+  withServer(WS, async (c) => {
+    const r = await call(c, "read_course_file", { file_url: await fileUrl(c, "slides.pptx") });
+    assert.ok(r.err && /Unsupported file type/.test(r.text));
+  }));
+await test("refuses to send the token to a non-eClass URL", () =>
+  withServer(WS, async (c) => {
+    for (const u of ["https://evil.example.com/webservice/pluginfile.php/1/x.pdf", `${base}/login/index.php`, "nonsense"]) {
+      const r = await call(c, "read_course_file", { file_url: u });
+      assert.ok(r.err && /file_url/.test(r.text), u + " -> " + r.text);
+    }
+  }));
+await test("non-webservice pluginfile URL is rewritten to the token endpoint", () =>
+  withServer(WS, async (c) => {
+    const u = (await fileUrl(c, "syllabus.pdf")).replace("/webservice/pluginfile.php", "/pluginfile.php");
+    assert.match((await call(c, "read_course_file", { file_url: u })).text, /Midterm/);
+  }));
+await test("file over ECLASS_MAX_FILE_MB is refused", () =>
+  withServer({ ...WS, ECLASS_MAX_FILE_MB: "0.0005" }, async (c) => {
+    const r = await call(c, "read_course_file", { file_url: await fileUrl(c, "syllabus.pdf") });
+    assert.ok(r.err && /larger than/.test(r.text), r.text);
+  }));
+await test("bad token on file download gives an error without leaking token", () =>
+  withServer({ ...WS, ECLASS_WS_TOKEN: "bad-secret-token" }, async (c) => {
+    const r = await call(c, "read_course_file", { file_url: `${base}/webservice/pluginfile.php/1/mod_resource/content/0/syllabus.pdf` });
+    assert.ok(r.err && !r.text.includes("bad-secret-token"), r.text);
   }));
 
 server.close();
