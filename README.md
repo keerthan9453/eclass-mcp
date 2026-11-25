@@ -6,24 +6,8 @@ A **read-only** [MCP](https://modelcontextprotocol.io) server for York Universit
 
 ## Try it in 10 seconds (no login needed)
 
-```bash
-npx -y github:keerthan9453/eclass-mcp --demo
-```
-Runs against a built-in fake eClass. To see every tool called, clone the repo and run `npm install && npm run demo`.
 
-## Use it with your account
-
-Pick whichever setup York allows. They can be combined.
-
-| Setup | What you get | Needs |
-|---|---|---|
-| **A. Calendar feed** (easiest) | `get_upcoming_deadlines` | Your private ICS URL |
-| **B. Web service token** | courses, assignments, grades, course contents | A Moodle token (York must allow it) |
-
-### A. Calendar feed
-In eClass: **Calendar → Import or export calendars → Export** → pick "All courses" + a time range → *Get calendar URL*. Copy it.
-
-### B. Web service token ( Preffered and Automated )
+### Web service token ( Preffered and Automated )
 
 **Easiest (macOS): one command, no DevTools**
 ```bash
