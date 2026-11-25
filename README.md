@@ -29,7 +29,7 @@ In eClass: **Calendar → Import or export calendars → Export** → pick "All 
 ```bash
 npx -y github:keerthan9453/eclass-mcp setup
 ```
-Your browser opens eClass. Sign in if asked, and when the browser asks to open **"eClass MCP Login"**, click **Open**. Setup checks the token, adds the `eclass` server to your Claude Desktop config (keeping your other servers and saving a `.bak` backup), and removes its helper. The token is never shown. Then quit Claude (Cmd+Q) and reopen it.
+Your browser opens eClass: sign in, then press Return in Terminal. Setup then opens the token link in the same browser (it also prints the link so you can paste it yourself); when the browser asks to open **"eClass MCP Login"**, click **Open**. Setup checks the token, adds the `eclass` server to your Claude Desktop config (keeping your other servers and saving a `.bak` backup), and removes its helper. The token is never shown. Then quit Claude (Cmd+Q) and reopen it.
 
 Setup opens eClass in Chrome, Brave, Firefox, Edge, Arc, Vivaldi or Opera (whichever it finds first), even if Safari is your default: Safari won't hand the link to the helper. If you only have Safari, install one of those or use the manual steps.
 

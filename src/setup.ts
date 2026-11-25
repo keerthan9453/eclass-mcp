@@ -11,6 +11,7 @@ import { chmod, copyFile, mkdir, mkdtemp, readFile, rm, writeFile } from "node:f
 import { homedir, tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { promisify } from "node:util";
+import { createInterface } from "node:readline/promises";
 
 const run = promisify(execFile);
 const say = (s = "") => process.stdout.write(s + "\n");
@@ -135,11 +136,11 @@ const BROWSERS: [string, string][] = [
   ["edge", "com.microsoft.edgemac"], ["arc", "company.thebrowser.Browser"], ["vivaldi", "com.vivaldi.Vivaldi"],
   ["opera", "com.operasoftware.Opera"], ["safari", "com.apple.Safari"],
 ];
-async function openInBrowser(url: string, choice?: string): Promise<string> {
+async function openInBrowser(url: string, choice?: string): Promise<[string, string]> {
   const list = choice ? BROWSERS.filter(([n]) => n === choice.toLowerCase()) : BROWSERS;
   if (choice && !list.length) throw new Error(`Unknown --browser "${choice}". Use one of: ${BROWSERS.map(([n]) => n).join(", ")}.`);
   for (const [name, id] of list) {
-    try { await run("open", ["-b", id, url]); return name; } catch { /* not installed, try next */ }
+    try { await run("open", ["-b", id, url]); return [name, id]; } catch { /* not installed, try next */ }
   }
   throw new Error(choice ? `${choice} does not seem to be installed.` : "No supported browser found.");
 }
@@ -153,7 +154,7 @@ async function waitForFile(path: string, ms: number): Promise<string> {
     }
     await new Promise((r) => setTimeout(r, 500));
   }
-  throw new Error("Timed out after 5 minutes without receiving the eClass link.");
+  throw new Error("Timed out after 2 minutes without receiving the eClass link.");
 }
 
 export async function runSetup(argv: string[]): Promise<number> {
@@ -182,17 +183,27 @@ export async function runSetup(argv: string[]): Promise<number> {
       if (hadMoodleApp) say("Note: the Moodle app is installed. If it opens instead of the setup helper, close it and run setup again.\n");
       app = await installCatcher(work, inbox);
       const launch = `${site}/admin/tool/mobile/launch.php?service=moodle_mobile_app&passport=${passport}&urlscheme=moodlemobile`;
-      say("1. Your browser will open eClass. Sign in with Passport York if asked.");
-      say(`2. When the browser asks to open "${APP_NAME}", click Open (or Allow).`);
-      say("   Waiting up to 5 minutes...");
-      const used = await openInBrowser(launch, arg("--browser"));
-      say(`   (Opened in ${used[0].toUpperCase() + used.slice(1)}.)`);
+
+      // Step 1: sign in first, so the token link isn't lost in the Passport York login redirects.
+      const [used, bundleId] = await openInBrowser(`${site}/my/`, arg("--browser"));
+      const nice = used[0].toUpperCase() + used.slice(1);
+      say(`Step 1. eClass is opening in ${nice}. Sign in with Passport York until you see your Dashboard.`);
       if (used === "safari")
-        say("   Safari usually can't hand the link over. If nothing happens, install Chrome, Brave or Firefox and run setup again.");
-      say("");
-      const hint = setTimeout(() => say("   Still waiting. If the browser showed an error instead of asking to open \"" + APP_NAME + "\",\n" +
-        "   press Ctrl+C and run setup again with another browser, e.g. --browser firefox.\n"), 45_000);
-      try { link = await waitForFile(inbox, 5 * 60_000); } finally { clearTimeout(hint); }
+        say("        Safari usually can't hand the token over. If step 2 fails, install Chrome, Brave or Firefox and run setup again.");
+      const rl = createInterface({ input: process.stdin, output: process.stdout });
+      await rl.question("        Press Return here once you're signed in... ");
+      rl.close();
+
+      // Step 2: open the token link in the same browser.
+      say(`\nStep 2. Opening the token link in ${nice}.`);
+      say(`        When ${nice} asks to open "${APP_NAME}", click Open (or Allow).`);
+      say("        If nothing opens, paste this link into the same browser's address bar:");
+      say(`        ${launch}`);
+      say("        Waiting up to 2 minutes...\n");
+      await run("open", ["-b", bundleId, launch]).catch(() => undefined);
+      const hint = setTimeout(() => say("        Still waiting. If the browser showed an error instead of asking to open \"" + APP_NAME + "\",\n" +
+        "        press Ctrl+C and run setup again with another browser, e.g. --browser firefox.\n"), 45_000);
+      try { link = await waitForFile(inbox, 2 * 60_000); } finally { clearTimeout(hint); }
     }
 
     const { token, signatureOk } = decodeLaunchLink(link, site, passport);
