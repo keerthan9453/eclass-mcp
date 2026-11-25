@@ -190,6 +190,31 @@ function parsePages(spec: string | undefined, total: number): number[] {
   return [...set].sort((x, y) => x - y);
 }
 
+
+// Collapse whitespace and drop empty lines.
+function tidy(t: string): string {
+  return t.replace(/\r/g, "").split("\n").map((l) => l.replace(/[ \t\u00a0]+/g, " ").trim()).filter(Boolean).join("\n");
+}
+// Remove header/footer lines that repeat on most pages (digits ignored, so "Page 3 of 9" counts as repeated).
+function stripRepeated(pages: string[]): string[] {
+  if (pages.length < 3) return pages;
+  const norm = (l: string) => l.toLowerCase().replace(/\d+/g, "#");
+  const seen = new Map<string, number>();
+  for (const t of pages) {
+    const lines = t.split("\n");
+    const edge = new Set([...lines.slice(0, 2), ...lines.slice(-2)].map(norm));
+    for (const k of edge) seen.set(k, (seen.get(k) ?? 0) + 1);
+  }
+  const repeated = new Set([...seen].filter(([, n]) => n >= Math.max(3, pages.length * 0.6)).map(([k]) => k));
+  if (!repeated.size) return pages;
+  return pages.map((t) => {
+    const lines = t.split("\n");
+    while (lines.length && repeated.has(norm(lines[0]))) lines.shift();
+    while (lines.length && repeated.has(norm(lines[lines.length - 1]))) lines.pop();
+    return lines.join("\n");
+  });
+}
+
 const TEXT_TYPES = /^(text\/|application\/(json|xml|csv))/;
 
 const fmtDate = (d: Date | number) =>
@@ -342,40 +367,115 @@ if (TOKEN) {
     },
   );
 
+  // Download a file once and return cleaned text per page (non-PDFs are one "page").
+  async function loadFile(file_url: string): Promise<{ pdf: boolean; pages: string[] } | { unsupported: string } | { scanned: number }> {
+    const url = eclassFileUrl(file_url);
+    const res = await downloadFile(url.toString());
+    if (res.status < 200 || res.status >= 300) throw new Error(`HTTP ${res.status} downloading file`);
+    if (res.bytes.subarray(0, 5).toString("latin1") === "%PDF-") {
+      const { getDocumentProxy, extractText } = await import("unpdf");
+      const { text: per } = await extractText(await getDocumentProxy(new Uint8Array(res.bytes)), { mergePages: false });
+      const pages = stripRepeated((per as string[]).map(tidy));
+      if (!pages.some((t) => t.trim())) return { scanned: pages.length };
+      return { pdf: true, pages };
+    }
+    if (TEXT_TYPES.test(res.contentType) || /\.(txt|md|csv|json|xml|html?)$/i.test(url.pathname)) {
+      const t = res.bytes.toString("utf8");
+      if (/^\s*\{\s*"(error|exception)"/.test(t)) { const j = JSON.parse(t); throw new Error(j.error ?? j.message ?? "eClass refused the file"); }
+      const body = res.contentType.includes("html") ? t.replace(/<script[\s\S]*?<\/script>|<style[\s\S]*?<\/style>|<[^>]+>/g, " ") : t;
+      return { pdf: false, pages: [tidy(body)] };
+    }
+    return { unsupported: res.contentType };
+  }
+  const notText = (r: any) =>
+    "unsupported" in r ? fail(`Unsupported file type (${r.unsupported}). Only PDFs and text files can be read for now.`)
+    : "scanned" in r ? text(`PDF has ${r.scanned} pages but no text layer (probably scanned images). OCR is not supported.`) : null;
+  const cap = (out: string, max: number, hint: string) =>
+    out.length > max ? out.slice(0, max) + `\n\n[truncated at ${max} of ${out.length} chars. ${hint}]` : out;
+
+  server.registerTool(
+    "outline_course_file",
+    {
+      description: "Cheap first look at a course file: page count, size of each page and its first line (usually the heading). Use before reading so you can pick pages.",
+      inputSchema: { file_url: z.string().describe("A file_url from list_course_files") },
+    },
+    async ({ file_url }) => {
+      try {
+        const r = await loadFile(file_url);
+        const bad = notText(r); if (bad) return bad;
+        const { pdf, pages } = r as { pdf: boolean; pages: string[] };
+        const total = pages.reduce((n, t) => n + t.length, 0);
+        const rows = pages.map((t, i) => {
+          const first = t.split("\n").map((l) => l.trim()).find(Boolean) ?? "(blank)";
+          return `p.${i + 1} (${t.length} chars): ${first.slice(0, 90)}`;
+        });
+        return text(`${pdf ? `PDF, ${pages.length} pages` : "Text file"}, ${total} chars in total.\n` +
+          cap(rows.join("\n"), 4000, "Long document; use search_course_file."));
+      } catch (e: any) {
+        return fail(scrub(String(e.message)));
+      }
+    },
+  );
+
+  server.registerTool(
+    "search_course_file",
+    {
+      description: "Find text inside a course file and return only the matching lines with page numbers. Prefer this over read_course_file to answer a specific question (exam dates, late policy, weights). Separate alternatives with |, e.g. \"exam|midterm|test\".",
+      inputSchema: {
+        file_url: z.string().describe("A file_url from list_course_files"),
+        query: z.string().min(1).describe("Words to find (case-insensitive). Use | for alternatives"),
+        context_lines: z.number().int().min(0).max(5).default(1).describe("Lines to include around each match"),
+        max_results: z.number().int().min(1).max(50).default(15),
+      },
+    },
+    async ({ file_url, query, context_lines, max_results }) => {
+      try {
+        const r = await loadFile(file_url);
+        const bad = notText(r); if (bad) return bad;
+        const { pdf, pages } = r as { pdf: boolean; pages: string[] };
+        const terms = query.split("|").map((q) => q.trim().toLowerCase()).filter(Boolean);
+        const hits: string[] = []; let count = 0;
+        pages.forEach((t, pi) => {
+          const lines = t.split("\n");
+          let lastEnd = -1;
+          lines.forEach((l, li) => {
+            if (count >= max_results || !terms.some((q) => l.toLowerCase().includes(q))) return;
+            count++;
+            const from = Math.max(li - context_lines, lastEnd + 1), to = Math.min(lines.length - 1, li + context_lines);
+            if (from > to) return;
+            const where = pdf ? `p.${pi + 1}` : `line ${li + 1}`;
+            hits.push(`${where}: ${lines.slice(from, to + 1).map((x) => x.trim()).filter(Boolean).join(" / ")}`);
+            lastEnd = to;
+          });
+        });
+        if (!hits.length) return text(`No matches for "${query}" in ${pages.length} ${pdf ? "pages" : "file"}. Try other words or outline_course_file.`);
+        return text(cap(`${count} match${count === 1 ? "" : "es"}${count >= max_results ? " (limit reached)" : ""}:\n` + hits.join("\n"), 6000, "Narrow the query."));
+      } catch (e: any) {
+        return fail(scrub(String(e.message)));
+      }
+    },
+  );
+
   server.registerTool(
     "read_course_file",
     {
-      description: "Download an eClass course file and return its text. Supports PDFs (text layer only, no OCR) and plain-text formats. Use pages to read part of a long PDF.",
+      description: "Return the text of a course file (PDF text layer or plain text). This can be long: prefer search_course_file, or outline_course_file then read specific pages.",
       inputSchema: {
         file_url: z.string().describe("A file_url from list_course_files"),
         pages: z.string().optional().describe('PDF pages to read, e.g. "1-3,7". Default: all'),
-        max_chars: z.number().int().min(500).max(100000).default(20000).describe("Truncate the returned text to this many characters"),
+        max_chars: z.number().int().min(500).max(100000).default(6000).describe("Truncate the returned text to this many characters"),
       },
     },
     async ({ file_url, pages, max_chars }) => {
       try {
-        const url = eclassFileUrl(file_url);
-        const res = await downloadFile(url.toString());
-        const head = res.bytes.subarray(0, 5).toString("latin1");
-        if (res.status < 200 || res.status >= 300) throw new Error(`HTTP ${res.status} downloading file`);
-        let out: string;
-        if (head === "%PDF-") {
-          const { getDocumentProxy, extractText } = await import("unpdf");
-          const pdf = await getDocumentProxy(new Uint8Array(res.bytes));
-          const { totalPages, text: per } = await extractText(pdf, { mergePages: false });
-          const want = parsePages(pages, totalPages);
-          const body = want.map((n) => `--- page ${n} ---\n${(per as string[])[n - 1].trim()}`).join("\n\n");
-          if (!body.replace(/--- page \d+ ---/g, "").trim())
-            return text(`PDF has ${totalPages} pages but no text layer (probably scanned images). OCR is not supported.`);
-          out = `PDF, ${totalPages} pages (showing ${want.length}).\n\n${body}`;
-        } else if (TEXT_TYPES.test(res.contentType) || /\.(txt|md|csv|json|xml|html?)$/i.test(url.pathname)) {
-          const t = res.bytes.toString("utf8");
-          if (/^\s*\{\s*"(error|exception)"/.test(t)) throw new Error(JSON.parse(t).error ?? JSON.parse(t).message ?? "eClass refused the file");
-          out = res.contentType.includes("html") ? t.replace(/<script[\s\S]*?<\/script>|<style[\s\S]*?<\/style>|<[^>]+>/g, " ").replace(/[ \t]+/g, " ") : t;
-        } else {
-          return fail(`Unsupported file type (${res.contentType}). Only PDFs and text files can be read for now.`);
-        }
-        return text(out.length > max_chars ? out.slice(0, max_chars) + `\n\n[truncated at ${max_chars} of ${out.length} chars; use pages or max_chars]` : out);
+        const r = await loadFile(file_url);
+        const bad = notText(r); if (bad) return bad;
+        const { pdf, pages: per } = r as { pdf: boolean; pages: string[] };
+        if (!pdf) return text(cap(per[0], max_chars, "Use search_course_file, or raise max_chars."));
+        const want = parsePages(pages, per.length);
+        const body = want.map((n) => `--- page ${n} ---\n${per[n - 1]}`).join("\n\n");
+        return text(cap(`PDF, ${per.length} pages (showing ${want.length}).\n\n${body}`, max_chars,
+          "Use search_course_file or the pages parameter, or raise max_chars."));
       } catch (e: any) {
         return fail(scrub(String(e.message)));
       }

@@ -84,7 +84,7 @@ console.log("Moodle web service (token)");
 const WS = { ECLASS_BASE_URL: base, ECLASS_WS_TOKEN: GOOD_TOKEN };
 await test("all tools exposed when token set", () =>
   withServer(WS, async (c) => {
-    assert.deepEqual(await names(c), ["check_connection", "get_assignments", "get_course_contents", "get_grades", "get_upcoming_deadlines", "list_course_files", "list_courses", "read_course_file"]);
+    assert.deepEqual(await names(c), ["check_connection", "get_assignments", "get_course_contents", "get_grades", "get_upcoming_deadlines", "list_course_files", "list_courses", "outline_course_file", "read_course_file", "search_course_file"]);
   }));
 await test("fetch transport still works (ECLASS_TRANSPORT=fetch)", () =>
   withServer({ ...WS, ECLASS_TRANSPORT: "fetch" }, async (c) => { assert.match((await call(c, "check_connection")).text, /Demo Student/); }));
@@ -147,7 +147,7 @@ await test("read_course_file extracts PDF text, all pages and page ranges", () =
   withServer(WS, async (c) => {
     const u = await fileUrl(c, "syllabus.pdf");
     const all = await call(c, "read_course_file", { file_url: u });
-    assert.ok(!all.err, all.text); assert.match(all.text, /2 pages/); assert.match(all.text, /Midterm Test: October 21, 2026/);
+    assert.ok(!all.err, all.text); assert.match(all.text, /4 pages/); assert.match(all.text, /Midterm Test: October 21, 2026/);
     const p2 = await call(c, "read_course_file", { file_url: u, pages: "2" });
     assert.ok(!/Instructor/.test(p2.text) && /Important Dates/.test(p2.text), p2.text);
   }));
@@ -158,7 +158,9 @@ await test("read_course_file works over fetch transport too", () =>
 await test("max_chars truncates with a note", () =>
   withServer(WS, async (c) => {
     const r = await call(c, "read_course_file", { file_url: await fileUrl(c, "syllabus.pdf"), max_chars: 500 });
-    assert.ok(r.text.length < 700 || /truncated/.test(r.text), r.text);
+    assert.ok(r.text.length <= 650, r.text);
+    const big = await call(c, "read_course_file", { file_url: await fileUrl(c, "syllabus.pdf"), max_chars: 500, pages: "1-4" });
+    assert.ok(big.text.length <= 650);
   }));
 await test("scanned PDF (no text layer) is reported, not crashed", () =>
   withServer(WS, async (c) => {
@@ -193,6 +195,40 @@ await test("bad token on file download gives an error without leaking token", ()
   withServer({ ...WS, ECLASS_WS_TOKEN: "bad-secret-token" }, async (c) => {
     const r = await call(c, "read_course_file", { file_url: `${base}/webservice/pluginfile.php/1/mod_resource/content/0/syllabus.pdf` });
     assert.ok(r.err && !r.text.includes("bad-secret-token"), r.text);
+  }));
+
+console.log("Token-saving file tools");
+await test("default read is capped at 6000 chars and strips repeated header/footer", () =>
+  withServer(WS, async (c) => {
+    const r = await call(c, "read_course_file", { file_url: await fileUrl(c, "syllabus.pdf") });
+    assert.ok(r.text.length <= 6200);
+    assert.ok(!/EECS 2311 Syllabus - Fall 2026/.test(r.text) && !/Page \d of 4/.test(r.text), r.text);
+    assert.match(r.text, /Late sprints lose 10%/);
+  }));
+await test("outline shows page count and headings only", () =>
+  withServer(WS, async (c) => {
+    const r = await call(c, "outline_course_file", { file_url: await fileUrl(c, "syllabus.pdf") });
+    assert.ok(!r.err, r.text); assert.match(r.text, /PDF, 4 pages/); assert.match(r.text, /p\.2 \(\d+ chars\): Important Dates/);
+    assert.ok(!/Midterm Test: October/.test(r.text), "outline must not include body text");
+  }));
+await test("search returns only matching lines with page numbers", () =>
+  withServer(WS, async (c) => {
+    const r = await call(c, "search_course_file", { file_url: await fileUrl(c, "syllabus.pdf"), query: "midterm test|final exam", context_lines: 0 });
+    assert.ok(!r.err, r.text); assert.match(r.text, /p\.2: Midterm Test: October 21/); assert.match(r.text, /p\.1: .*Final Exam 35%/);
+    assert.ok(!/Late sprints|Agile/.test(r.text), r.text);
+    assert.ok(r.text.length < 500, `search output should be small (${r.text.length})`);
+  }));
+await test("search: no match, max_results limit, text files", () =>
+  withServer(WS, async (c) => {
+    const u = await fileUrl(c, "syllabus.pdf");
+    assert.match((await call(c, "search_course_file", { file_url: u, query: "zzzz" })).text, /No matches/);
+    assert.match((await call(c, "search_course_file", { file_url: u, query: "a", max_results: 2 })).text, /2 matches \(limit reached\)/);
+    assert.match((await call(c, "search_course_file", { file_url: await fileUrl(c, "notes.txt"), query: "laptop" })).text, /line 1: Week 1 notes/);
+  }));
+await test("outline/search on scanned and unsupported files", () =>
+  withServer(WS, async (c) => {
+    assert.match((await call(c, "outline_course_file", { file_url: await fileUrl(c, "scan.pdf") })).text, /no text layer/);
+    assert.ok((await call(c, "search_course_file", { file_url: await fileUrl(c, "slides.pptx"), query: "x" })).err);
   }));
 
 server.close();
