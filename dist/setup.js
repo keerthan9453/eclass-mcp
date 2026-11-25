@@ -125,6 +125,26 @@ async function moodleAppInstalled() {
     const r = await run("mdfind", ["kMDItemCFBundleIdentifier == 'com.moodle.moodlemobile'"]).catch(() => ({ stdout: "" }));
     return !!r.stdout.trim();
 }
+// Safari refuses to follow a server redirect to a custom link type ("address is invalid"),
+// so prefer another installed browser. Returns the browser name used.
+const BROWSERS = [
+    ["chrome", "com.google.Chrome"], ["brave", "com.brave.Browser"], ["firefox", "org.mozilla.firefox"],
+    ["edge", "com.microsoft.edgemac"], ["arc", "company.thebrowser.Browser"], ["vivaldi", "com.vivaldi.Vivaldi"],
+    ["opera", "com.operasoftware.Opera"], ["safari", "com.apple.Safari"],
+];
+async function openInBrowser(url, choice) {
+    const list = choice ? BROWSERS.filter(([n]) => n === choice.toLowerCase()) : BROWSERS;
+    if (choice && !list.length)
+        throw new Error(`Unknown --browser "${choice}". Use one of: ${BROWSERS.map(([n]) => n).join(", ")}.`);
+    for (const [name, id] of list) {
+        try {
+            await run("open", ["-b", id, url]);
+            return name;
+        }
+        catch { /* not installed, try next */ }
+    }
+    throw new Error(choice ? `${choice} does not seem to be installed.` : "No supported browser found.");
+}
 async function waitForFile(path, ms) {
     const end = Date.now() + ms;
     while (Date.now() < end) {
@@ -165,9 +185,20 @@ export async function runSetup(argv) {
             const launch = `${site}/admin/tool/mobile/launch.php?service=moodle_mobile_app&passport=${passport}&urlscheme=moodlemobile`;
             say("1. Your browser will open eClass. Sign in with Passport York if asked.");
             say(`2. When the browser asks to open "${APP_NAME}", click Open (or Allow).`);
-            say("   Waiting up to 5 minutes...\n");
-            await run("open", [launch]);
-            link = await waitForFile(inbox, 5 * 60_000);
+            say("   Waiting up to 5 minutes...");
+            const used = await openInBrowser(launch, arg("--browser"));
+            say(`   (Opened in ${used[0].toUpperCase() + used.slice(1)}.)`);
+            if (used === "safari")
+                say("   Safari usually can't hand the link over. If nothing happens, install Chrome, Brave or Firefox and run setup again.");
+            say("");
+            const hint = setTimeout(() => say("   Still waiting. If the browser showed an error instead of asking to open \"" + APP_NAME + "\",\n" +
+                "   press Ctrl+C and run setup again with another browser, e.g. --browser firefox.\n"), 45_000);
+            try {
+                link = await waitForFile(inbox, 5 * 60_000);
+            }
+            finally {
+                clearTimeout(hint);
+            }
         }
         const { token, signatureOk } = decodeLaunchLink(link, site, passport);
         if (!signatureOk)

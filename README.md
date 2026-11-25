@@ -31,7 +31,9 @@ npx -y github:keerthan9453/eclass-mcp setup
 ```
 Your browser opens eClass. Sign in if asked, and when the browser asks to open **"eClass MCP Login"**, click **Open**. Setup checks the token, adds the `eclass` server to your Claude Desktop config (keeping your other servers and saving a `.bak` backup), and removes its helper. The token is never shown. Then quit Claude (Cmd+Q) and reopen it.
 
-Options: `--site https://your.moodle.site`, `--config /path/to/config.json`.
+Setup opens eClass in Chrome, Brave, Firefox, Edge, Arc, Vivaldi or Opera (whichever it finds first), even if Safari is your default: Safari won't hand the link to the helper. If you only have Safari, install one of those or use the manual steps.
+
+Options: `--browser chrome|brave|firefox|edge|arc|vivaldi|opera|safari`, `--site https://your.moodle.site`, `--config /path/to/config.json`.
 
 **Manual steps** (Windows/Linux, or if the setup command doesn't work):
 
