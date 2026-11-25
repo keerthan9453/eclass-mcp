@@ -62,8 +62,11 @@ const UA = "eclass-mcp/0.1 (+https://github.com/keerthan9453/eclass-mcp)";
 function curlRequest(url, body) {
     return new Promise((resolve, reject) => {
         const cfg = (k, v) => `${k} = "${v.replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"\n`;
-        const args = ["-sS", "-L", "--max-time", String(TIMEOUT_MS / 1000), "-K", "-",
-            "-w", "\n%{http_code}\t%{content_type}\t%{url_effective}"];
+        // API calls (POST, token in the body) never follow redirects: a 307/308 would resend the token elsewhere.
+        // GETs (calendar feed) may follow up to 5 redirects, https only.
+        const follow = body === undefined ? ["-L", "--max-redirs", "5", "--proto-redir", "=https"] : [];
+        const args = ["-sS", ...follow, "--max-time", String(TIMEOUT_MS / 1000), "-K", "-",
+            "-w", "\n%{http_code}\t%{content_type}\t%{url_effective}\t%{redirect_url}"];
         // URL and body go via the config on stdin so they never appear in `ps`
         let input = cfg("url", url); // curl keeps its own default User-Agent
         if (body !== undefined)
@@ -77,20 +80,36 @@ function curlRequest(url, body) {
             if (code !== 0)
                 return reject(new Error(`curl failed (exit ${code}): ${err.trim().split("\n").pop()}`));
             const i = out.lastIndexOf("\n");
-            const [status, contentType, finalUrl] = out.slice(i + 1).split("\t");
-            resolve({ status: Number(status), contentType: contentType || "unknown", finalUrl: finalUrl || url, text: out.slice(0, i) });
+            const [status, contentType, finalUrl, redirectUrl] = out.slice(i + 1).split("\t");
+            resolve({ status: Number(status), contentType: contentType || "unknown", finalUrl: finalUrl || url, redirectUrl: redirectUrl || undefined, text: out.slice(0, i) });
         });
         child.stdin.end(input);
     });
 }
+/** fetch that never follows a redirect for POST, and follows GET redirects only to https (max 5). */
+async function safeFetch(url, init, followGet) {
+    let current = url;
+    for (let hop = 0;; hop++) {
+        const res = await fetch(current, { ...init, redirect: "manual" });
+        const loc = res.headers.get("location");
+        if (!followGet || res.status < 300 || res.status >= 400 || !loc || hop >= 5)
+            return res;
+        const next = new URL(loc, current);
+        if (next.protocol !== "https:")
+            return res;
+        current = next.toString();
+    }
+}
 async function fetchRequest(url, body) {
-    const res = await fetch(url, {
+    const res = await safeFetch(url, {
         method: body === undefined ? "GET" : "POST",
         body,
         headers: { "user-agent": UA, ...(body === undefined ? {} : { "content-type": "application/x-www-form-urlencoded" }) },
         signal: AbortSignal.timeout(TIMEOUT_MS),
-    });
-    return { status: res.status, contentType: res.headers.get("content-type") ?? "unknown", finalUrl: res.url, text: await res.text() };
+    }, body === undefined);
+    const loc = res.headers.get("location");
+    return { status: res.status, contentType: res.headers.get("content-type") ?? "unknown", finalUrl: res.url || url,
+        redirectUrl: loc ? new URL(loc, url).toString() : undefined, text: await res.text() };
 }
 async function httpRequest(url, body) {
     if ((process.env.ECLASS_TRANSPORT ?? "curl") === "fetch")
@@ -116,6 +135,15 @@ async function ws(wsfunction, params = {}) {
         ...Object.fromEntries(Object.entries(params).map(([k, v]) => [k, String(v)])),
     });
     const res = await httpRequest(`${BASE}/webservice/rest/server.php`, form.toString());
+    if (res.status >= 300 && res.status < 400) {
+        let where = "another address";
+        try {
+            where = new URL(res.redirectUrl ?? "").host || where;
+        }
+        catch { /* keep default */ }
+        throw new Error(`eClass redirected the request to ${where} instead of answering (HTTP ${res.status}). ` +
+            "The redirect was not followed, so your token was not sent there. This usually means a login page or a wrong ECLASS_BASE_URL.");
+    }
     const raw = res.text;
     const snippet = raw.replace(/<script[\s\S]*?<\/script>|<style[\s\S]*?<\/style>|<[^>]+>/g, " ").replace(/\s+/g, " ").trim().slice(0, 160);
     let data;
@@ -142,7 +170,8 @@ async function curlDownload(url) {
     try {
         const cfg = (k, v) => `${k} = "${v.replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"\n`;
         const meta = await new Promise((resolve, reject) => {
-            const child = spawn("curl", ["-sS", "-L", "--max-time", String(Math.max(60, TIMEOUT_MS / 1000)),
+            // Files may redirect to a storage/CDN host (GET, token only in the original URL): follow, https only.
+            const child = spawn("curl", ["-sS", "-L", "--max-redirs", "5", "--proto-redir", "=https", "--max-time", String(Math.max(60, TIMEOUT_MS / 1000)),
                 "--max-filesize", String(Math.max(1, Math.floor(MAX_FILE_MB * 1024 * 1024))), "-K", "-", "-w", "%{http_code}\t%{content_type}"]);
             let o = "", e = "";
             child.stdout.on("data", (d) => (o += d));
@@ -160,7 +189,7 @@ async function curlDownload(url) {
     }
 }
 async function fetchDownload(url) {
-    const res = await fetch(url, { headers: { "user-agent": UA }, signal: AbortSignal.timeout(Math.max(60000, TIMEOUT_MS)) });
+    const res = await safeFetch(url, { headers: { "user-agent": UA }, signal: AbortSignal.timeout(Math.max(60000, TIMEOUT_MS)) }, true);
     const bytes = Buffer.from(await res.arrayBuffer());
     if (bytes.length > MAX_FILE_MB * 1024 * 1024)
         throw new Error(`File is larger than ${MAX_FILE_MB} MB (ECLASS_MAX_FILE_MB).`);

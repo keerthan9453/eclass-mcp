@@ -1,6 +1,6 @@
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
-import { startMock, GOOD_TOKEN } from "../demo/mock-eclass.mjs";
+import { startMock, GOOD_TOKEN, captured } from "../demo/mock-eclass.mjs";
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
@@ -235,6 +235,18 @@ await test("outline/search on scanned and unsupported files", () =>
     assert.ok((await call(c, "search_course_file", { file_url: await fileUrl(c, "slides.pptx"), query: "x" })).err);
   }));
 
+console.log("Redirect safety");
+for (const code of [301, 302, 307, 308]) for (const transport of ["curl", "fetch"]) {
+  await test(`API ${code} redirect is not followed and the token is not resent (${transport})`, () =>
+    withServer({ ...WS, ECLASS_TRANSPORT: transport, ECLASS_WS_TOKEN: `redirect-${code}-secret-token` }, async (c) => {
+      captured.length = 0;
+      const r = await call(c, "check_connection");
+      assert.ok(r.err && /redirected/.test(r.text) && /not followed/.test(r.text), r.text);
+      assert.equal(captured.length, 0, "token body reached the redirect target");
+      assert.ok(!r.text.includes("secret-token"), "token echoed in error");
+    }));
+}
+
 console.log("setup command (browser step simulated)");
 const runSetup = (env) => new Promise((res) => execFile("node", [ENTRY, "setup"], { env: { PATH: process.env.PATH, ...env } }, (e, out) => res({ code: e ? e.code : 0, out })));
 const link = (site, passport, token) => "moodlemobile://token=" + Buffer.from(createHash("md5").update(site + passport).digest("hex") + ":::" + token).toString("base64");
@@ -243,7 +255,7 @@ await test("valid link: verifies token, writes config, keeps other servers, neve
   fs.writeFileSync(cfgPath, JSON.stringify({ mcpServers: { other: { command: "x" } }, theme: "dark" }));
   const r = await runSetup({ ECLASS_BASE_URL: base, ECLASS_SETUP_CONFIG: cfgPath, ECLASS_SETUP_PASSPORT: "p1", ECLASS_SETUP_TEST_LINK: link(base, "p1", GOOD_TOKEN) });
   assert.equal(r.code, 0, r.out); assert.match(r.out, /Token works: .* as Demo Student/); assert.ok(!r.out.includes(GOOD_TOKEN), "token printed!");
-  assert.ok(!/signature did not match/.test(r.out));
+  assert.ok(!/not created for this setup run/.test(r.out));
   const cfg = JSON.parse(fs.readFileSync(cfgPath, "utf8"));
   assert.equal(cfg.mcpServers.eclass.env.ECLASS_WS_TOKEN, GOOD_TOKEN); assert.equal(cfg.mcpServers.other.command, "x"); assert.equal(cfg.theme, "dark");
   assert.deepEqual(cfg.mcpServers.eclass.args, ["-y", "github:keerthan9453/eclass-mcp"]);
@@ -268,7 +280,7 @@ await test("garbage link and wrong signature are handled", async () => {
   const bad = await runSetup({ ECLASS_BASE_URL: base, ECLASS_SETUP_CONFIG: dir + "/a.json", ECLASS_SETUP_TEST_LINK: "moodlemobile://token=bm9wZQ==" });
   assert.equal(bad.code, 1); assert.match(bad.out, /valid token/);
   const sig = await runSetup({ ECLASS_BASE_URL: base, ECLASS_SETUP_CONFIG: dir + "/b.json", ECLASS_SETUP_PASSPORT: "mine", ECLASS_SETUP_TEST_LINK: link(base, "someone-else", GOOD_TOKEN) });
-  assert.equal(sig.code, 0); assert.match(sig.out, /signature did not match/);
+  assert.equal(sig.code, 1, sig.out); assert.match(sig.out, /not created for this setup run/); assert.ok(!fs.existsSync(dir + "/b.json"), "config must not be written");
 });
 await test("invalid JSON config is not overwritten", async () => {
   const dir = fs.mkdtempSync(os.tmpdir() + "/cfg-"); const cfgPath = dir + "/c.json"; fs.writeFileSync(cfgPath, "{ broken");

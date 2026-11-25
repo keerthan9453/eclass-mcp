@@ -8,6 +8,7 @@ const FILES = {
   "slides.pptx": ["application/vnd.openxmlformats-officedocument.presentationml.presentation", Buffer.from("PK fake")],
 };
 
+export const captured = [];
 export const GOOD_TOKEN = "demo-token-1234567890";
 const day = 86400;
 const now = Math.floor(Date.now() / 1000);
@@ -59,9 +60,12 @@ export function startMock() {
       if (!f) { res.statusCode = 404; return res.end("not found"); }
       res.setHeader("content-type", f[0]); return res.end(f[1]);
     }
+    if (url.pathname === "/capture") { let b = ""; for await (const c of req) b += c; captured.push(b); res.end("{}"); return; }
     if (url.pathname === "/webservice/rest/server.php") {
       let body = ""; for await (const c of req) body += c;
       const p = new URLSearchParams(body);
+      const rd = p.get("wstoken")?.match(/^redirect-(\d{3})-/);
+      if (rd) { res.statusCode = Number(rd[1]); res.setHeader("location", "/capture"); return res.end(); }
       if (p.get("wstoken") === "html-token-123") { res.setHeader("content-type", "text/html"); return res.end("<html>SSO page</html>"); }
       const json = (o) => { res.setHeader("content-type", "application/json"); res.end(JSON.stringify(o)); };
       if (p.get("wstoken") !== GOOD_TOKEN)

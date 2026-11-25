@@ -182,7 +182,7 @@ async function openInSameTab(browser, url) {
         return false;
     }
 }
-async function waitForFile(path, ms, onTick) {
+async function waitForFile(path, ms, onTick, accept = () => true) {
     const start = Date.now(), end = start + ms;
     let lastTick = 0;
     while (Date.now() < end) {
@@ -193,8 +193,11 @@ async function waitForFile(path, ms, onTick) {
         }
         if (existsSync(path)) {
             const t = (await readFile(path, "utf8")).trim();
-            if (t.includes("token="))
-                return t;
+            if (t.includes("token=")) {
+                if (accept(t))
+                    return t;
+                await rm(path, { force: true }); // not from this run: discard and keep waiting
+            }
         }
         await new Promise((r) => setTimeout(r, 500));
     }
@@ -256,6 +259,15 @@ export async function runSetup(argv) {
             say("        If nothing happens, paste this link into the signed-in eClass tab:");
             say(`        ${launch}`);
             say("        Waiting up to 2 minutes...\n");
+            const fromThisRun = (l) => {
+                try {
+                    if (decodeLaunchLink(l, site, passport).signatureOk)
+                        return true;
+                }
+                catch { /* malformed */ }
+                say("        Ignored a moodlemobile:// link that did not come from this setup run. Still waiting...");
+                return false;
+            };
             link = await waitForFile(inbox, 2 * 60_000, async (sec) => {
                 if (sec === 30) {
                     // Re-check: make sure our helper is still the one macOS hands the link to.
@@ -267,12 +279,12 @@ export async function runSetup(argv) {
                 if (sec === 75)
                     say("        Still waiting. If the browser shows an error instead of asking to open \"" + APP_NAME + "\",\n" +
                         "        press Ctrl+C and run setup again with another browser, e.g. --browser chrome.\n");
-            });
+            }, fromThisRun);
             process.removeListener("SIGINT", cleanupOnCtrlC);
         }
         const { token, signatureOk } = decodeLaunchLink(link, site, passport);
         if (!signatureOk)
-            say("Warning: the link's signature did not match this setup run. Checking the token anyway.");
+            throw new Error("The link was not created for this setup run (signature mismatch), so it was not trusted. Run setup again.");
         const info = await siteInfo(site, token);
         say(`✓ Token works: signed in to ${info.sitename} as ${info.fullname}.`);
         const updated = await saveToClaudeConfig(configPath, token, site);

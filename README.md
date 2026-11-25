@@ -98,7 +98,7 @@ The ICS URL and token grant access to your account. Keep them in your MCP client
 ## Development
 ```bash
 npm install
-npm test     # builds and runs 46 end-to-end scenarios against a mock eClass
+npm test     # builds and runs 54 end-to-end scenarios against a mock eClass
 npm run demo # scripted walkthrough
 ```
 `dist/` is committed so `npx github:...` works without a build step. Run `npm run build` before committing source changes.
