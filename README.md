@@ -23,7 +23,7 @@ Pick whichever setup York allows. They can be combined.
 ### A. Calendar feed
 In eClass: **Calendar → Import or export calendars → Export** → pick "All courses" + a time range → *Get calendar URL*. Copy it.
 
-### B. Web service token
+### B. Web service token ( Preffered and Automated )
 
 **Easiest (macOS): one command, no DevTools**
 ```bash
